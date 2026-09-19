@@ -1,0 +1,192 @@
+---
+title: "RNA-seq Differential Expression Analysis: Dexamethasone Response in Airway Smooth Muscle"
+author: "Arjun Babu S B"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                       fig.width = 7, fig.height = 5)
+library(DESeq2)
+library(airway)
+library(ggplot2)
+library(pheatmap)
+library(gprofiler2)
+```
+
+## Introduction
+
+This report analyzes RNA-seq data from the `airway` dataset (Himes et al.,
+2014, *PLoS ONE*): human airway smooth muscle cell lines, some treated with
+dexamethasone (a glucocorticoid) and some untreated. The goal is to identify
+genes whose expression changes significantly with treatment, and to interpret
+those changes biologically.
+
+```{r load-data}
+data(airway)
+colData(airway)
+```
+
+## Building the DESeq2 Dataset
+
+Raw counts are combined with sample metadata into a `DESeqDataSet`. The design
+formula `~ cell + dex` tells DESeq2 to account for baseline differences
+between the four cell lines, so that only the effect of treatment (`dex`) is
+tested. Genes with very low counts across all samples are filtered out before
+analysis, as they carry little information and only add statistical noise.
+
+```{r build-dds}
+dds <- DESeqDataSetFromMatrix(
+  countData = assay(airway),
+  colData   = colData(airway),
+  design    = ~ cell + dex
+)
+
+keep <- rowSums(counts(dds)) >= 10
+dds  <- dds[keep, ]
+
+dds <- estimateSizeFactors(dds)
+sizeFactors(dds)
+```
+
+## Quality Control
+
+A variance-stabilizing transformation puts genes on a comparable scale before
+exploratory analysis. PCA and a sample-distance heatmap both check whether
+samples separate by treatment, independent of the statistical test to come.
+
+```{r qc-transform}
+vsd <- vst(dds, blind = TRUE)
+```
+
+```{r pca-plot}
+plotPCA(vsd, intgroup = "dex")
+```
+
+```{r sample-heatmap}
+sampleDists      <- dist(t(assay(vsd)))
+sampleDistMatrix <- as.matrix(sampleDists)
+pheatmap(sampleDistMatrix)
+```
+
+Both the PCA and the sample-distance heatmap show samples clustering cleanly
+by treatment group, indicating that dexamethasone treatment is a dominant
+source of variation in this dataset.
+
+## Differential Expression Analysis
+
+The reference level is set to `"untrt"` so that results describe the effect
+of adding dexamethasone, and the full DESeq2 statistical workflow is run.
+
+```{r deseq-test}
+dds$dex <- relevel(dds$dex, ref = "untrt")
+dds     <- DESeq(dds)
+res     <- results(dds)
+summary(res)
+```
+
+## Volcano Plot
+
+Genes are classified as significantly up- or down-regulated using an adjusted
+p-value cutoff of 0.05 combined with a minimum 2-fold change
+(`|log2FoldChange| > 1`), to focus on changes that are both statistically
+robust and biologically substantial.
+
+```{r rank-results}
+res <- res[order(res$padj), ]
+
+res_df      <- as.data.frame(res)
+res_df$gene <- rownames(res_df)
+
+res_df$sig <- "Not significant"
+res_df$sig[res_df$padj < 0.05 & res_df$log2FoldChange >  1] <- "Up"
+res_df$sig[res_df$padj < 0.05 & res_df$log2FoldChange < -1] <- "Down"
+```
+
+```{r volcano-plot}
+ggplot(res_df, aes(x = log2FoldChange, y = -log10(pvalue), color = sig)) +
+  geom_point(alpha = 0.5) +
+  scale_color_manual(values = c("Up" = "red", "Down" = "blue",
+                                 "Not significant" = "grey")) +
+  theme_minimal()
+```
+
+## Gene Annotation
+
+Ensembl gene IDs are mapped to readable gene symbols using annotation
+metadata already bundled with the `airway` package.
+
+```{r annotate}
+gene_symbols <- as.data.frame(rowData(airway))[, c("gene_id", "gene_name")]
+
+res_annotated <- merge(res_df, gene_symbols, by.x = "gene", by.y = "gene_id")
+res_annotated <- res_annotated[order(res_annotated$padj), ]
+
+head(res_annotated[, c("gene", "gene_name", "log2FoldChange", "padj")])
+```
+
+As a validation check, `CRISPLD2` — the gene highlighted in the title of the
+original publication — is confirmed as significant and up-regulated in this
+independently reproduced analysis:
+
+```{r crispld2-check}
+res_annotated[res_annotated$gene_name == "CRISPLD2", ]
+```
+
+```{r save-results}
+write.csv(res_annotated, "results_DE_annotated.csv", row.names = FALSE)
+```
+
+## Heatmap of Top Differentially Expressed Genes
+
+```{r top-genes-heatmap}
+top_hits <- head(res_annotated, 20)
+mat      <- assay(vsd)[top_hits$gene, ]
+rownames(mat) <- top_hits$gene_name
+
+pheatmap(mat,
+         annotation_col = as.data.frame(colData(vsd))["dex"],
+         scale = "row")
+```
+
+## Pathway Enrichment
+
+Significant genes are tested for enrichment in Gene Ontology (Biological
+Process) and KEGG pathway categories using `gprofiler2`, which queries gene
+symbols directly against a public enrichment database.
+
+```{r enrichment}
+sig_genes <- res_annotated[res_annotated$sig %in% c("Up", "Down"), ]
+gene_list <- sig_genes$gene_name
+
+gostres <- gost(query = gene_list, organism = "hsapiens",
+                sources = c("GO:BP", "KEGG"))
+```
+
+```{r enrichment-results}
+go_bp <- gostres$result[gostres$result$source == "GO:BP", ]
+go_bp_specific <- go_bp[go_bp$term_size < 500, ]
+go_bp_specific <- go_bp_specific[order(go_bp_specific$p_value), ]
+head(go_bp_specific[, c("term_name", "p_value", "term_size", "intersection_size")])
+
+kegg_hits <- gostres$result[gostres$result$source == "KEGG", ]
+kegg_hits <- kegg_hits[order(kegg_hits$p_value), ]
+head(kegg_hits[, c("term_name", "p_value", "term_size", "intersection_size")])
+```
+
+## Conclusions
+
+- Dexamethasone treatment produces a clear, strong transcriptional response:
+  samples separate cleanly by treatment in both PCA and hierarchical
+  clustering, well before any statistical testing.
+- Differential expression testing identifies thousands of significantly
+  affected genes, including `CRISPLD2`, independently reproducing the
+  headline finding of the original publication.
+- Pathway enrichment highlights extracellular matrix organization, muscle
+  system processes, and inflammatory signaling — biologically consistent
+  with known glucocorticoid mechanisms in airway smooth muscle.
+
+**Dataset:** Himes BE, et al. (2014) RNA-Seq Transcriptome Profiling
+Identifies CRISPLD2 as a Glucocorticoid Responsive Gene that Modulates
+Cytokine Function in Airway Smooth Muscle Cells. *PLoS ONE* 9(6):e99625.
