@@ -57,7 +57,7 @@ Cytokine Function in Airway Smooth Muscle Cells.* PLoS ONE 9(6):e99625.
 - Compile the full analysis into one reproducible R Markdown report
 - **Output:** `scripts/04_enrichment_analysis.R`, `report/final_report.Rmd` (+ knitted HTML)
 
-### Week 5 (Optional Extension)
+### Week 5 
 Pick one:
 - Build a small Shiny app to interactively explore the volcano plot / gene list
 - Repeat the pipeline on a disease-relevant dataset from GEO/TCGA
